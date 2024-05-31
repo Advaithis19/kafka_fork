@@ -1,0 +1,37 @@
+# Kafka principal
+For SSL authentication, the principal will be derived using the rules defined by ssl.principal.mapping.rules applied on the distinguished name from the client certificate if one is provided; 
+otherwise, if client authentication is not required, the principal name will be ANONYMOUS. 
+
+For SASL authentication, the principal will be derived using the rules defined by sasl.kerberos.principal.to.local.rules if GSSAPI is in use, and the SASL authentication ID for other mechanisms. 
+
+For PLAINTEXT, the principal will be ANONYMOUS.
+
+--------------------------------------------------------------------------------
+
+# Grant permissions to user Alice
+$ bin/kafka-acls.sh \
+    --bootstrap-server broker1:9092 \
+    --add --allow-principal User:Alice \
+    --producer \
+    --resource-pattern-type prefixed --topic acme.infosec.
+    
+--------------------------------------------------------------------------------
+    
+# JAAS
+Applications enable the authentication process by instantiating a LoginContext object, which in turn references a Configuration to determine the authentication technology or technologies, or LoginModule(s), to be used in performing the authentication.
+
+Access control decisions are based both on the executing code's CodeSource and on the user or service running the code, who is represented by a Subject object. The Subject is updated by a LoginModule with relevant Principals and credentials if authentication succeeds.
+
+The key JAAS class is javax.security.auth.Subject, which represents a grouping of related information for a single entity such as a person. It encompasses the entity's Principals, public credentials, and private credentials. A Subject may have many Principals. For example, a person may have a name Principal ("John Doe") and a SSN Principal ("123-45-6789"), which distinguish it from other subjects. A Subject may also own security-related attributes, which are referred to as credentials; see the section Credentials. Sensitive credentials that require special protection, such as private cryptographic keys, are stored within a private credential Set. Credentials intended to be shared, such as public key certificates, are stored within a public credential Set. 
+
+An application writer does not have to instantiate a Subject. If the application instantiates a LoginContext and does not pass a Subject to the LoginContext constructor, the LoginContext instantiates a new empty Subject. See the LoginContext section.
+
+To authenticate a subject (user or service), the following steps are performed:
+-> An application instantiates a LoginContext.
+-> The LoginContext consults a Configuration to load all of the LoginModules configured for that application.
+-> The application invokes the LoginContext's login method.
+-> The login method invokes all of the loaded LoginModules. Each LoginModule attempts to authenticate the subject. Upon success, LoginModules associate relevant Principals and credentials with a Subject object that represents the subject being authenticated.
+-> The LoginContext returns the authentication status to the application.
+-> If authentication succeeded, the application retrieves the Subject from the LoginContext.
+
+The LoginModule interface gives developers the ability to implement different kinds of authentication technologies that can be plugged in under an application. For example, one type of LoginModule may perform a user name/password-based form of authentication. Other LoginModules may interface to hardware devices such as smart cards or biometric devices. Note: If you are an application writer, you do not need to understand the workings of LoginModules. All you have to know is how to write your application and specify configuration information (such as in a login configuration file) such that the application will be able to utilize the LoginModule specified by the configuration to authenticate the user.

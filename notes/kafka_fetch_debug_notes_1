@@ -1,0 +1,19 @@
+components: 
+
+server    (intellij), 
+zookeeper (terminal), 
+producer  (terminal), 
+consumer  (terminal)
+
+flow - callstack:
+
+<file_name>     (<?alternate_file_name>) (<function_name>    - <return_call>                                     (line_number))
+
+Thread.java                              (run                - target.run()                                      (842) )
+Thread.java     (KafkaRequestHandler)    (run                - target.run()                                      (76)  )
+KafkaApis.scala                          (handle             - case ApiKeys.FETCH => handleFetchRequest(request) (181) )
+KafkaApis.scala                          (handleFetchRequest - replicaManager.fetchMessages(~)                   (994) )
+ReplicaManager.scala                     (fetchMessages      - responseCallback(fetchPartitionData)              (1076))
+
+-------- things that can go wrong with the ssl setup --------
+1) pkcs10 csr 

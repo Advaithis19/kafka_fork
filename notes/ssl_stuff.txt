@@ -1,0 +1,3 @@
+CA
+Owner: CN=iisc_root_csa, O=IISC_CSA_CA_TEST, L=BA, ST=KA, C=IN
+Issuer: CN=iisc_root_csa, O=IISC_CSA_CA_TEST, L=BA, ST=KA, C=IN

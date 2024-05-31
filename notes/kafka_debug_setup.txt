@@ -1,0 +1,261 @@
+# place breakpoints in following files
+
+# folder
+/home/advaith/Documents/kafka/clients/src/main/java/org/apache/kafka/common/requests
+
+# working folder
+core/src/main/scala/kafka/security
+
+# target folders in callstack (most likely)
+core/src/main/scala/kafka/zk
+core/src/main/scala/kafka/security/authorizer
+clients/src/main/java/org/apache/kafka/server/authorizer
+core/src/main/scala/kafka/server
+
+# files
+FetchRequest.java (line: 342)
+FetchResponse.java (line: 91) -> KafkaApis.scala (line: 762) -> AuthHelper.scala (line: 111) -> Authorizer.java (line: 105) / AclAuthorizer.scala (line: 228) -> KafkaZkClient.scala (line: 1305)
+ProduceRequest.java (line: 123)
+ProduceResponse.java (line: 60)
+
+# --------------------------------------------------------------------
+
+# navigate to folder
+cd Documents/kafka
+
+# start zookeeper
+bin/zookeeper-server-start.sh config/zookeeper.properties
+
+# start the server in intellij or terminal
+export KAFKA_OPTS="-Djava.security.auth.login.config=config/kafka_server_jaas.conf"
+bin/kafka-server-start.sh config/server.properties
+
+# create event
+bin/kafka-topics.sh --create --topic quickstart-events --bootstrap-server localhost:9093 --command-config config/client.properties
+
+# describe event
+bin/kafka-topics.sh --describe --topic quickstart-events --bootstrap-server localhost:9093 --command-config config/client.properties
+
+# add read/write acls
+bin/kafka-acls.sh --bootstrap-server localhost:9093 --add --allow-principal User:consumer1 --operation Read --topic quickstart-events --command-config config/client.properties
+bin/kafka-acls.sh --bootstrap-server localhost:9093 --add --allow-principal User:consumer1 --operation Describe --operation Read --group test-consumer-group --command-config config/client.properties
+bin/kafka-acls.sh --bootstrap-server localhost:9093 --add --allow-principal User:producer1 --operation Write --topic quickstart-events --command-config config/client.properties
+
+# start producer
+bin/kafka-console-producer.sh --topic quickstart-events --bootstrap-server localhost:9093 --producer.config config/producer.properties --producer-property security.protocol=SASL_PLAINTEXT --producer-property sasl.mechanism=PLAIN --producer-property sasl.jaas.config="org.apache.kafka.common.security.plain.PlainLoginModule required username=\"producer1\" password=\"producer1-secret\";"
+
+# start consumer
+bin/kafka-console-consumer.sh --topic quickstart-events --from-beginning --bootstrap-server localhost:9093 --consumer.config config/consumer.properties --consumer-property security.protocol=SASL_PLAINTEXT --consumer-property sasl.mechanism=PLAIN --consumer-property sasl.jaas.config="org.apache.kafka.common.security.plain.PlainLoginModule required username=\"consumer1\" password=\"consumer1-secret\";"
+
+# remove the logs and traces
+rm -rf /tmp/kafka-logs /tmp/zookeeper /tmp/kraft-combined-logs
+
+# --------------------------------------------------------------------
+
+# branch debug print format (<variable1><variable2>.<variable3>)
+variable1: level in hierarchy (1 - uppermost)
+variable2: instance count (a - first instance)
+variable3: conditional count (1 - first 'if')
+
+# modified files (debugging)
+1) KafkaApis.scala
+2) AuthHelper.scala
+3) AclAuthorizer.scala
+4) KafkaZkClient.scala
+5) AclEntry.scala
+6) ZookeeperClient.scala
+7) ZkData.scala
+
+# full list of interesting files in callstack
+1) clients/src/main/java/org/apache/kafka/common/requests/FetchResponse.java
+2) core/src/main/scala/kafka/server/KafkaApis.scala
+3) core/src/main/scala/kafka/server/AuthHelper.scala
+4) clients/src/main/java/org/apache/kafka/server/authorizer/Authorizer.java
+5) metadata/src/main/java/org/apache/kafka/metadata/authorizer/ClusterMetadataAuthorizer.java
+6) metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizer.java
+7) metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizerData.java
+8) core/src/main/scala/kafka/security/authorizer/AclAuthorizer.scala
+9) clients/src/main/java/org/apache/kafka/server/authorizer/AuthorizationResult.java
+10) core/src/main/scala/kafka/zk/KafkaZkClient.scala
+
+# auth debug output
+
+entered configure
+entered zkClientConfigFromKafkaConfigAndMap
+entered startZkChangeListeners
+entered loadCache
+entered loadAllAcls
+entered start
+
+-------------------handling create topic request-------------------
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = true----------------
+entered logAuditMessage
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = true----------------
+entered logAuditMessage
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = true----------------
+entered logAuditMessage
+
+getResourceTypes, getResourceNames, getVersionedAclsForResource, createAclPaths, close, conditionalSetAclsForResource, createAclsForResourceIfNotExists, conditionalDelete, createAclChangeNotification
+
+-------------------handling create acl request-------------------
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = true----------------
+entered logAuditMessage
+entered createAcls
+entered validateAclBinding
+entered updateResourceAcls
+entered getAclsFromZk
+entered updateCache
+entered updateAclChangedFlag
+entered processAclChangeNotification
+entered getAclsFromZk
+entered updateCache
+entered compare
+entered compare
+
+-------------------handling describe acl request-------------------
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = true----------------
+entered logAuditMessage
+entered acls
+
+-------------------handling produce request-------------------
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = false----------------
+entered aclsAllowAccess
+entered matchingAcls
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered isEmptyAclAndAuthorized
+entered denyAclExists
+entered matchingAclExists
+entered allowAclExists
+entered matchingAclExists
+entered logAuditMessage
+
+-------------------handling fetch request-------------------
+inside 1a.2
+inside 2b.2
+entered authorize
+entered authorizeAction
+entered isSuperUser
+----------------isSuperUser = false----------------
+entered aclsAllowAccess
+entered matchingAcls
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered compare
+entered isEmptyAclAndAuthorized
+entered denyAclExists
+entered matchingAclExists
+entered allowAclExists
+entered matchingAclExists
+entered logAuditMessage
+inside 2c.3
+inside 1e.2
+inside 2h.2
+inside 2i.1
+inside 1c.2
+inside 2g.2
+inside 3e.2
+
+# AclAuthorizer methods of interest in order
+(config - configure, zkClientConfigFromKafkaConfigAndMap, startZkChangeListeners, loadCache, loadAllAcls, processAclChangeNotification, getAclsFromZk, updateCache, start), (handler - authorize, authorizeAction, isSuperUser, aclsAllowAccess, matchingAcls, compare, isEmptyAclAndAuthorized, denyAclExists, matchingAclExists, allowAclExists, logAuditMessage)
+
+# KafkaZkClient methods of interest
+getResourceTypes, getResourceNames, getVersionedAclsForResource, createAclPaths, close, conditionalSetAclsForResource, createAclsForResourceIfNotExists, conditionalDelete, createAclChangeNotification
+
+# to figure out
+1) where is AclAuthorizer first called? (who ensures that it is configured first?)
+2) how to store the entries in zkclient
+3) how to fit linearly growing label entries in znode? what authenticated data structure to use (if there exists one at all)
+
+questions
+-> what guarantees that configure executes before authorize?
+-> where is the call made to create authz instance?
+
+[Error] /home/advaith/Documents/code/kafka/core/src/main/scala/kafka/security/authorizer/DifcAuthorizer.scala:102:63: overloaded method ++ with alternatives:
+  (that: scala.collection.IterableOnce[org.apache.kafka.security.authorizer.EffectiveSetEntry])scala.collection.immutable.Set[org.apache.kafka.security.authorizer.EffectiveSetEntry] <and>
+  [B >: org.apache.kafka.security.authorizer.EffectiveSetEntry](suffix: scala.collection.IterableOnce[B]): scala.collection.immutable.Set[B]
+ cannot be applied to (org.apache.kafka.security.authorizer.EffectiveSetEntry)
+one error found
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

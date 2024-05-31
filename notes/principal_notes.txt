@@ -1,0 +1,6 @@
+For SSL authentication, the principal will be derived using the rules defined by ssl.principal.mapping.rules applied on the distinguished name from the client certificate if one is provided; 
+otherwise, if client authentication is not required, the principal name will be ANONYMOUS. 
+
+For SASL authentication, the principal will be derived using the rules defined by sasl.kerberos.principal.to.local.rules if GSSAPI is in use, and the SASL authentication ID for other mechanisms. 
+
+For PLAINTEXT, the principal will be ANONYMOUS.
