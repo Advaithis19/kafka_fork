@@ -119,6 +119,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   val authHelper = new AuthHelper(authorizer)
   val requestHelper = new RequestHandlerHelper(requestChannel, quotas, time)
   val aclApis = new AclApis(authHelper, authorizer, requestHelper, "broker", config)
+//  val ifcApis = new IfcApis(authHelper, authorizer, requestHelper, "broker", config)
   val configManager = new ConfigAdminManager(brokerId, config, configRepository)
   val describeTopicPartitionsRequestHandler : Option[DescribeTopicPartitionsRequestHandler] = metadataCache match {
     case kRaftMetadataCache: KRaftMetadataCache =>
@@ -218,6 +219,8 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.DESCRIBE_ACLS => handleDescribeAcls(request)
         case ApiKeys.CREATE_ACLS => maybeForwardToController(request, handleCreateAcls)
         case ApiKeys.DELETE_ACLS => maybeForwardToController(request, handleDeleteAcls)
+//        case ApiKeys.CREATE_TAGS => maybeForwardToController(request, handleCreateTags)
+//        case ApiKeys.DELETE_TAGS => maybeForwardToController(request, handleDeleteTags)
         case ApiKeys.ALTER_CONFIGS => handleAlterConfigsRequest(request)
         case ApiKeys.DESCRIBE_CONFIGS => handleDescribeConfigsRequest(request)
         case ApiKeys.ALTER_REPLICA_LOG_DIRS => handleAlterReplicaLogDirsRequest(request)
@@ -2794,10 +2797,20 @@ class KafkaApis(val requestChannel: RequestChannel,
     aclApis.handleCreateAcls(request)
   }
 
+//  def handleCreateTags(request: RequestChannel.Request): Unit = {
+//    metadataSupport.requireZkOrThrow(KafkaApis.shouldAlwaysForward(request))
+//    ifcApis.handleCreateTags(request)
+//  }
+
   def handleDeleteAcls(request: RequestChannel.Request): Unit = {
     metadataSupport.requireZkOrThrow(KafkaApis.shouldAlwaysForward(request))
     aclApis.handleDeleteAcls(request)
   }
+
+//  def handleDeleteTags(request: RequestChannel.Request): Unit = {
+//    metadataSupport.requireZkOrThrow(KafkaApis.shouldAlwaysForward(request))
+//    ifcApis.handleDeleteTags(request)
+//  }
 
   def handleOffsetForLeaderEpochRequest(request: RequestChannel.Request): Unit = {
     val offsetForLeaderEpoch = request.body[OffsetsForLeaderEpochRequest]

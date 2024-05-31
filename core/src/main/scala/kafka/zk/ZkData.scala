@@ -40,7 +40,7 @@ import org.apache.kafka.common.utils.{SecurityUtils, Time}
 import org.apache.kafka.common.{KafkaException, TopicPartition, Uuid}
 import org.apache.kafka.metadata.LeaderRecoveryState
 import org.apache.kafka.metadata.migration.ZkMigrationLeadershipState
-import org.apache.kafka.security.authorizer.AclEntry
+import org.apache.kafka.security.authorizer.{AclEntry, LabelEntry}
 import org.apache.kafka.server.common.{MetadataVersion, ProducerIdsBlock}
 import org.apache.kafka.server.common.MetadataVersion.{IBP_0_10_0_IV1, IBP_2_7_IV0}
 import org.apache.kafka.server.config.ConfigType
@@ -52,6 +52,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.collection.{Map, Seq, immutable, mutable}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
+import kafka.security.authorizer.DifcAuthorizer.VersionedLabel
 
 // This file contains objects for encoding/decoding data stored in ZooKeeper nodes (znodes).
 
@@ -754,13 +755,6 @@ case object ExtendedAclChangeStore extends ZkAclChangeStore {
   }
 }
 
-object ResourceZNode {
-  def path(resource: ResourcePattern): String = ZkAclStore(resource.patternType).path(resource.resourceType, resource.name)
-
-  def encode(acls: Set[AclEntry]): Array[Byte] = Json.encodeAsBytes(AclEntry.toJsonCompatibleMap(acls.asJava))
-  def decode(bytes: Array[Byte], stat: Stat): VersionedAcls = VersionedAcls(AclEntry.fromBytes(bytes).asScala.toSet, stat.getVersion)
-}
-
 object ExtendedAclChangeEvent {
   val currentVersion: Int = 1
 }
@@ -779,6 +773,180 @@ case class ExtendedAclChangeEvent(@BeanProperty @JsonProperty("version") version
       resource = new ResourcePattern(resType, name, patType)
     } yield resource
   }
+}
+
+sealed trait ZkLabelStore {
+  val patternType: PatternType
+  val labelPath: String
+
+  def path(resourceType: ResourceType): String = s"$labelPath/${SecurityUtils.resourceTypeName(resourceType)}"
+
+  def path(resourceType: ResourceType, resourceName: String): String = s"$labelPath/${SecurityUtils.resourceTypeName(resourceType)}/$resourceName"
+
+  def changeStore: ZkLabelChangeStore
+}
+
+object ZkLabelStore {
+  private val storesByType: Map[PatternType, ZkLabelStore] = PatternType.values
+    .filter(_.isSpecific)
+    .map(patternType => (patternType, create(patternType)))
+    .toMap
+
+  val stores: Iterable[ZkLabelStore] = storesByType.values
+
+  val securePaths: Iterable[String] = stores
+    .flatMap(store => Set(store.labelPath, store.changeStore.labelChangePath))
+
+  def apply(patternType: PatternType): ZkLabelStore = {
+    storesByType.get(patternType) match {
+      case Some(store) => store
+      case None => throw new KafkaException(s"Invalid pattern type: $patternType")
+    }
+  }
+
+  private def create(patternType: PatternType) = {
+    patternType match {
+      case PatternType.LITERAL => LiteralLabelStore
+      case _ => new ExtendedLabelStore(patternType)
+    }
+  }
+}
+
+object LiteralLabelStore extends ZkLabelStore {
+  val patternType: PatternType = PatternType.LITERAL
+  val labelPath: String = "/kafka-label"
+
+  def changeStore: ZkLabelChangeStore = LiteralLabelChangeStore
+}
+
+class ExtendedLabelStore(val patternType: PatternType) extends ZkLabelStore {
+  if (patternType == PatternType.LITERAL)
+    throw new IllegalArgumentException("Literal pattern types are not supported")
+
+  val labelPath: String = s"${ExtendedLabelZNode.path}/${patternType.name.toLowerCase}"
+
+  def changeStore: ZkLabelChangeStore = ExtendedLabelChangeStore
+}
+
+object ExtendedLabelZNode {
+  def path = "/kafka-label-extended"
+}
+
+trait LabelChangeNotificationHandler {
+  def processNotification(resource: ResourcePattern): Unit
+}
+
+trait LabelChangeSubscription extends AutoCloseable {
+  def close(): Unit
+}
+
+case class LabelChangeNode(path: String, bytes: Array[Byte])
+
+sealed trait ZkLabelChangeStore {
+  val labelChangePath: String
+  def createPath: String = s"$labelChangePath/${ZkLabelChangeStore.SequenceNumberPrefix}"
+
+  def decode(bytes: Array[Byte]): ResourcePattern
+
+  protected def encode(resource: ResourcePattern): Array[Byte]
+
+  def createChangeNode(resource: ResourcePattern): LabelChangeNode = LabelChangeNode(createPath, encode(resource))
+
+  def createListener(handler: LabelChangeNotificationHandler, zkClient: KafkaZkClient): LabelChangeSubscription = {
+    val rawHandler: NotificationHandler = (bytes: Array[Byte]) => handler.processNotification(decode(bytes))
+
+    val labelChangeListener = new ZkNodeChangeNotificationListener(
+      zkClient, labelChangePath, ZkLabelChangeStore.SequenceNumberPrefix, rawHandler)
+
+    labelChangeListener.init()
+
+    () => labelChangeListener.close()
+  }
+}
+
+object ZkLabelChangeStore {
+  val stores: Iterable[ZkLabelChangeStore] = List(LiteralLabelChangeStore, ExtendedLabelChangeStore)
+
+  def SequenceNumberPrefix = "label_changes_"
+}
+
+case object LiteralLabelChangeStore extends ZkLabelChangeStore {
+  val name = "LiteralLabelChangeStore"
+  val labelChangePath: String = "/kafka-label-changes"
+
+  def encode(resource: ResourcePattern): Array[Byte] = {
+    if (resource.patternType != PatternType.LITERAL)
+      throw new IllegalArgumentException("Only literal resource patterns can be encoded")
+
+    val legacyName = resource.resourceType.toString + ":" + resource.name
+    legacyName.getBytes(UTF_8)
+  }
+
+  def decode(bytes: Array[Byte]): ResourcePattern = {
+    val string = new String(bytes, UTF_8)
+    string.split(":", 2) match {
+      case Array(resourceType, resourceName, _*) => new ResourcePattern(ResourceType.fromString(resourceType), resourceName, PatternType.LITERAL)
+      case _ => throw new IllegalArgumentException("expected a string in format ResourceType:ResourceName but got " + string)
+    }
+  }
+}
+
+case object ExtendedLabelChangeStore extends ZkLabelChangeStore {
+  val name = "ExtendedLabelChangeStore"
+  val labelChangePath: String = "/kafka-label-extended-changes"
+
+  def encode(resource: ResourcePattern): Array[Byte] = {
+    if (resource.patternType == PatternType.LITERAL)
+      throw new IllegalArgumentException("Literal pattern types are not supported")
+
+    Json.encodeAsBytes(ExtendedLabelChangeEvent(
+      ExtendedLabelChangeEvent.currentVersion,
+      resource.resourceType.name,
+      resource.name,
+      resource.patternType.name))
+  }
+
+  def decode(bytes: Array[Byte]): ResourcePattern = {
+    val changeEvent = Json.parseBytesAs[ExtendedLabelChangeEvent](bytes) match {
+      case Right(event) => event
+      case Left(e) => throw new IllegalArgumentException("Failed to parse Label change event", e)
+    }
+
+    changeEvent.toResource match {
+      case Success(r) => r
+      case Failure(e) => throw new IllegalArgumentException("Failed to convert Label change event to resource", e)
+    }
+  }
+}
+
+object ExtendedLabelChangeEvent {
+  val currentVersion: Int = 1
+}
+
+case class ExtendedLabelChangeEvent(@BeanProperty @JsonProperty("version") version: Int,
+                                  @BeanProperty @JsonProperty("resourceType") resourceType: String,
+                                  @BeanProperty @JsonProperty("name") name: String,
+                                  @BeanProperty @JsonProperty("patternType") patternType: String) {
+  if (version > ExtendedLabelChangeEvent.currentVersion)
+    throw new UnsupportedVersionException(s"Label change event received for unsupported version: $version")
+
+  def toResource: Try[ResourcePattern] = {
+    for {
+      resType <- Try(ResourceType.fromString(resourceType))
+      patType <- Try(PatternType.fromString(patternType))
+      resource = new ResourcePattern(resType, name, patType)
+    } yield resource
+  }
+}
+
+object ResourceZNode {
+  def path(resource: ResourcePattern): String = ZkAclStore(resource.patternType).path(resource.resourceType, resource.name)
+
+  def encode(acls: Set[AclEntry]): Array[Byte] = Json.encodeAsBytes(AclEntry.toJsonCompatibleMap(acls.asJava))
+    def encodeL(labelEntries: Set[LabelEntry]): Array[Byte] = Json.encodeAsBytes(LabelEntry.toJsonCompatibleMap(labelEntries.asJava))
+
+  def decode(bytes: Array[Byte], stat: Stat): VersionedAcls = VersionedAcls(AclEntry.fromBytes(bytes).asScala.toSet, stat.getVersion)
+    def decodeL(bytes: Array[Byte], stat: Stat): VersionedLabel = VersionedLabel(LabelEntry.fromBytes(bytes).asScala.toSet, stat.getVersion)
 }
 
 object ClusterZNode {
@@ -1090,7 +1258,7 @@ object ZkData {
     DelegationTokenAuthZNode.path,
     ExtendedAclZNode.path,
     MigrationZNode.path,
-    FeatureZNode.path) ++ ZkAclStore.securePaths
+    FeatureZNode.path) ++ ZkAclStore.securePaths ++ ZkLabelStore.securePaths
 
   // These are persistent ZK paths that should exist on kafka broker startup.
   val PersistentZkPaths: Seq[String] = Seq(

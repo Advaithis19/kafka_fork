@@ -22,6 +22,7 @@ import kafka.api.LeaderAndIsr
 import kafka.cluster.Broker
 import kafka.controller.{KafkaController, LeaderIsrAndControllerEpoch, ReplicaAssignment}
 import kafka.security.authorizer.AclAuthorizer.{NoAcls, VersionedAcls}
+import kafka.security.authorizer.DifcAuthorizer.VersionedLabel
 import kafka.server.KafkaConfig
 import kafka.utils.Logging
 import kafka.zk.TopicZNode.TopicIdReplicaAssignment
@@ -33,7 +34,7 @@ import org.apache.kafka.common.security.token.delegation.{DelegationToken, Token
 import org.apache.kafka.common.utils.{Time, Utils}
 import org.apache.kafka.common.{KafkaException, TopicPartition, Uuid}
 import org.apache.kafka.metadata.migration.ZkMigrationLeadershipState
-import org.apache.kafka.security.authorizer.AclEntry
+import org.apache.kafka.security.authorizer.{AclEntry, LabelEntry}
 import org.apache.kafka.server.config.{ConfigType, ZkConfigs}
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.storage.internals.log.LogConfig
@@ -1298,6 +1299,15 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     ZkAclChangeStore.stores.foreach(store => createRecursive(store.aclChangePath, throwIfPathExists = false))
   }
 
+//  def createLabelPaths(): Unit = {
+//    ZkLabelStore.stores.foreach(store => {
+//      createRecursive(store.labelPath, throwIfPathExists = false)
+//      createRecursive(store.path(ResourceType.TOPIC), throwIfPathExists = false)
+//    })
+//
+//    ZkLabelChangeStore.stores.foreach(store => createRecursive(store.labelChangePath, throwIfPathExists = false))
+//  }
+
   /**
    * Gets VersionedAcls for a given Resource
    * @param resource Resource to get VersionedAcls for
@@ -1309,6 +1319,15 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     getDataResponse.resultCode match {
       case Code.OK => ResourceZNode.decode(getDataResponse.data, getDataResponse.stat)
       case Code.NONODE => NoAcls
+      case _ => throw getDataResponse.resultException.get
+    }
+  }
+
+  def getVersionedLabelForTopic(resource: ResourcePattern): VersionedLabel = {
+    val getDataRequest = GetDataRequest(ResourceZNode.path(resource))
+    val getDataResponse = retryRequestUntilConnected(getDataRequest)
+    getDataResponse.resultCode match {
+      case Code.OK => ResourceZNode.decodeL(getDataResponse.data, getDataResponse.stat)
       case _ => throw getDataResponse.resultException.get
     }
   }
@@ -1342,6 +1361,27 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     }
   }
 
+  def conditionalSetLabelForResource(resource: ResourcePattern,
+                                     tagSet: Set[LabelEntry],
+                                    expectedVersion: Int): (Boolean, Int) = {
+    def set(labelData: Array[Byte],  expectedVersion: Int): SetDataResponse = {
+      val setDataRequest = SetDataRequest(ResourceZNode.path(resource), labelData, expectedVersion)
+      retryRequestUntilConnected(setDataRequest)
+    }
+
+    if (expectedVersion < 0)
+      throw new IllegalArgumentException(s"Invalid version $expectedVersion provided for conditional update")
+
+    val labelData = ResourceZNode.encodeL(tagSet)
+
+    val setDataResponse = set(labelData, expectedVersion)
+    setDataResponse.resultCode match {
+      case Code.OK => (true, setDataResponse.stat.getVersion)
+      case Code.NONODE | Code.BADVERSION  => (false, ZkVersion.UnknownVersion)
+      case _ => throw setDataResponse.resultException.get
+    }
+  }
+
   def createAclsForResourceIfNotExists(resource: ResourcePattern, aclsSet: Set[AclEntry]): (Boolean, Int) = {
     def create(aclData: Array[Byte]): CreateResponse = {
       val path = ResourceZNode.path(resource)
@@ -1359,6 +1399,23 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     }
   }
 
+    def createLabelForResourceIfNotExists(resource: ResourcePattern, labelEntries: Set[LabelEntry]): (Boolean, Int) = {
+      def create(labelData: Array[Byte]): CreateResponse = {
+        val path = ResourceZNode.path(resource)
+        val createRequest = CreateRequest(path, labelData, defaultAcls(path), CreateMode.PERSISTENT)
+        retryRequestUntilConnected(createRequest)
+      }
+
+      val labelData = ResourceZNode.encodeL(labelEntries)
+
+      val createResponse = create(labelData)
+      createResponse.resultCode match {
+        case Code.OK => (true, 0)
+        case Code.NODEEXISTS => (false, ZkVersion.UnknownVersion)
+        case _ => throw createResponse.resultException.get
+      }
+    }
+
   /**
    * Creates an Acl change notification message.
    * @param resource resource pattern that has changed
@@ -1366,6 +1423,13 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
   def createAclChangeNotification(resource: ResourcePattern): Unit = {
     val aclChange = ZkAclStore(resource.patternType).changeStore.createChangeNode(resource)
     val createRequest = CreateRequest(aclChange.path, aclChange.bytes, defaultAcls(aclChange.path), CreateMode.PERSISTENT_SEQUENTIAL)
+    val createResponse = retryRequestUntilConnected(createRequest)
+    createResponse.maybeThrow()
+  }
+
+  def createLabelChangeNotification(resource: ResourcePattern): Unit = {
+    val labelChange = ZkLabelStore(resource.patternType).changeStore.createChangeNode(resource)
+    val createRequest = CreateRequest(labelChange.path, labelChange.bytes, defaultAcls(labelChange.path), CreateMode.PERSISTENT_SEQUENTIAL)
     val createResponse = retryRequestUntilConnected(createRequest)
     createResponse.maybeThrow()
   }
@@ -1910,6 +1974,8 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
   }
 
   def defaultAcls(path: String): Seq[ACL] = ZkData.defaultAcls(isSecure, path)
+
+//  def defaultLabel(path: String): Seq[ACL] = ZkData.defaultLabel(isSecure, path)
 
   def secure: Boolean = isSecure
 

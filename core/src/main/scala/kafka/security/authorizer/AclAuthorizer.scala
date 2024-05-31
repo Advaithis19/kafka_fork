@@ -47,6 +47,8 @@ import scala.collection.{Seq, immutable, mutable}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Random, Success, Try}
 
+import kafka.security.authorizer.DifcAuthorizer
+
 object AclAuthorizer {
   // Optional override zookeeper cluster configuration where acls will be stored. If not specified,
   // acls will be stored in the same zookeeper where all other kafka broker metadata is stored.
@@ -180,6 +182,8 @@ class AclAuthorizer extends Authorizer with Logging {
 
   private val retryBackoffMs = 100
   private val retryBackoffJitterMs = 50
+
+  private val difcAuthorizer = new DifcAuthorizer()
 
   /**
    * Guaranteed to be called before any authorize call is made.
@@ -521,7 +525,11 @@ class AclAuthorizer extends Authorizer with Logging {
     }
 
     // Evaluate if operation is allowed
-    val authorized = isSuperUser(principal) || aclsAllowAccess
+    var authorized = isSuperUser(principal)
+
+    // multiplex based on the operation
+    if(operation == AclOperation.READ || operation == AclOperation.WRITE) authorized = authorized || difcAuthorizer.labelsAllowAccess(resource, operation)
+    else authorized = authorized || aclsAllowAccess
 
     logAuditMessage(requestContext, action, authorized)
     if (authorized) AuthorizationResult.ALLOWED else AuthorizationResult.DENIED
@@ -579,12 +587,14 @@ class AclAuthorizer extends Authorizer with Logging {
   private def loadCache(): Unit = {
     lock synchronized  {
       loadAllAcls(zkClient, this, updateCache)
+      DifcAuthorizer.loadAllLabels(zkClient, difcAuthorizer.updateCache, difcAuthorizer.updateEfCache)
     }
   }
 
   private[authorizer] def startZkChangeListeners(): Unit = {
     aclChangeListeners = ZkAclChangeStore.stores
       .map(store => store.createListener(AclChangedNotificationHandler, zkClient))
+    // add change listener for labels
   }
 
   private def filterToResources(filter: ResourcePatternFilter): Set[ResourcePattern] = {
@@ -754,6 +764,8 @@ class AclAuthorizer extends Authorizer with Logging {
       updateCache(resource, versionedAcls)
     }
   }
+
+  // write methods for processing label changes
 
   private object AclChangedNotificationHandler extends AclChangeNotificationHandler {
     override def processNotification(resource: ResourcePattern): Unit = {

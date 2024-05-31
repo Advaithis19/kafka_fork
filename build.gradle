@@ -973,6 +973,12 @@ project(':core') {
     // ZooKeeperMain depends on commons-cli but declares the dependency as `provided`
     implementation libs.commonsCli
 
+    // SLF4J API dependency
+    implementation 'org.slf4j:slf4j-api:2.0.7'
+
+    // SLF4J Simple binding (for basic logging output) - with compile scope
+    implementation 'org.slf4j:slf4j-simple:2.0.7'
+
     compileOnly libs.log4j
 
     testImplementation project(':clients').sourceSets.test.output
