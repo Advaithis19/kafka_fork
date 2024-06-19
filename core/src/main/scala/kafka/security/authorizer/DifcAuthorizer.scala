@@ -1,9 +1,11 @@
 package kafka.security.authorizer
 
-import DifcAuthorizer.{ResourceOrdering, TagSeqs, VersionedEffectiveSetEntries, VersionedLabel, filterEffective, getLabelFromZk}
+import DifcAuthorizer.{ResourceOrdering, TagSeqs, VersionedEffectiveSetEntries, VersionedLabel, filterEffective, getLabelFromZk, loadAllLabels}
+import kafka.server.{KafkaConfig, KafkaServer}
+import kafka.utils.Implicits.MapExtensionMethods
 import kafka.zk.{KafkaZkClient, ZkLabelStore, ZkVersion}
 import org.apache.kafka.common.resource.{PatternType, ResourcePattern, ResourceType}
-import org.apache.kafka.common.utils.SecurityUtils
+import org.apache.kafka.common.utils.{SecurityUtils, Time}
 
 import scala.util.{Failure, Success, Try}
 import scala.collection.{immutable, mutable}
@@ -11,8 +13,19 @@ import org.apache.kafka.common.acl.{AclOperation, TagBinding}
 import org.apache.kafka.common.acl.AclOperation.{DESCRIBE, READ, WRITE}
 import org.apache.kafka.common.security.auth.KafkaPrincipal
 import org.apache.kafka.security.authorizer.{EffectiveSetEntry, LabelEntry}
+import org.apache.kafka.server.config.ZkConfigs
+import org.apache.zookeeper.client.ZKClientConfig
+
+import java.util
+import scala.jdk.CollectionConverters.MapHasAsScala
 
 object DifcAuthorizer {
+  val configPrefix: String = "authorizer."
+  private val ZkUrlProp = s"${configPrefix}zookeeper.url"
+  private val ZkConnectionTimeOutProp = s"${configPrefix}zookeeper.connection.timeout.ms"
+  private val ZkSessionTimeOutProp = s"${configPrefix}zookeeper.session.timeout.ms"
+  private val ZkMaxInFlightRequests = s"${configPrefix}zookeeper.max.in.flight.requests"
+
   case class VersionedLabel(tags: Set[LabelEntry], zkVersion: Int) {
     def exists: Boolean = zkVersion != ZkVersion.UnknownVersion
   }
@@ -45,6 +58,29 @@ object DifcAuthorizer {
         else
           (a.name compare b.name) * -1
       }
+    }
+  }
+
+  private[authorizer] def zkClientConfigFromKafkaConfigAndMap(kafkaConfig: KafkaConfig, configMap: mutable.Map[String, _<:Any]): ZKClientConfig = {
+    val zkSslClientEnable = configMap.get(DifcAuthorizer.configPrefix + ZkConfigs.ZK_SSL_CLIENT_ENABLE_CONFIG).
+      map(_.toString.trim).getOrElse(kafkaConfig.zkSslClientEnable.toString).toBoolean
+    if (!zkSslClientEnable)
+      new ZKClientConfig
+    else {
+      // start with the base config from the Kafka configuration
+      // be sure to force creation since the zkSslClientEnable property in the kafkaConfig could be false
+      val zkClientConfig = KafkaServer.zkClientConfigFromKafkaConfig(kafkaConfig, forceZkSslClientEnable = true)
+      // add in any prefixed overlays
+      ZkConfigs.ZK_SSL_CONFIG_TO_SYSTEM_PROPERTY_MAP.asScala.forKeyValue { (kafkaProp, sysProp) =>
+        configMap.get(DifcAuthorizer.configPrefix + kafkaProp).foreach { prefixedValue =>
+          zkClientConfig.setProperty(sysProp,
+            if (kafkaProp == ZkConfigs.ZK_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG)
+              (prefixedValue.toString.trim.toUpperCase == "HTTPS").toString
+            else
+              prefixedValue.toString.trim)
+        }
+      }
+      zkClientConfig
     }
   }
 
@@ -119,10 +155,32 @@ class DifcAuthorizer {
   private var efCache = new scala.collection.immutable.TreeMap[ResourcePattern, VersionedEffectiveSetEntries]()(new ResourceOrdering)
   private var labelCache = new scala.collection.immutable.TreeMap[ResourcePattern, VersionedLabel]()(new ResourceOrdering)
 
+  private var zkClient: KafkaZkClient = _
+
   // no need for the resourceCache at all
 //  @volatile
 //  private var resourceCache = new scala.collection.immutable.HashMap[ResourceTypeKey,
 //    scala.collection.immutable.HashSet[String]]()
+
+  def configure(javaConfigs: util.Map[String, _]): Unit = {
+    val configs = javaConfigs.asScala
+    val props = new java.util.Properties()
+    configs.forKeyValue { (key, value) => props.put(key, value.toString.trim) }
+    val kafkaConfig = KafkaConfig.fromProps(props, doLog = false)
+    val zkUrl = configs.get(DifcAuthorizer.ZkUrlProp).map(_.toString.trim).getOrElse(kafkaConfig.zkConnect)
+
+    val zkConnectionTimeoutMs = configs.get(DifcAuthorizer.ZkConnectionTimeOutProp).map(_.toString.trim.toInt).getOrElse(kafkaConfig.zkConnectionTimeoutMs)
+    val zkSessionTimeOutMs = configs.get(DifcAuthorizer.ZkSessionTimeOutProp).map(_.toString.trim.toInt).getOrElse(kafkaConfig.zkSessionTimeoutMs)
+    val zkMaxInFlightRequests = configs.get(DifcAuthorizer.ZkMaxInFlightRequests).map(_.toString.trim.toInt).getOrElse(kafkaConfig.zkMaxInFlightRequests)
+    val zkClientConfig = DifcAuthorizer.zkClientConfigFromKafkaConfigAndMap(kafkaConfig, configs)
+    val time = Time.SYSTEM
+
+    zkClient = KafkaZkClient(zkUrl, kafkaConfig.zkEnableSecureAcls, zkSessionTimeOutMs, zkConnectionTimeoutMs,
+      zkMaxInFlightRequests, time, name = "ACL authorizer", zkClientConfig = zkClientConfig,
+      metricGroup = "kafka.security", metricType = "AclAuthorizer", createChrootIfNecessary = true)
+    zkClient.createLabelPaths()
+    loadAllLabels(zkClient, updateCache, updateEfCache)
+  }
 
   def updateCache(resource: ResourcePattern, newLabel: VersionedLabel): Unit = {
 //    val currentTags = labelCache(resource).tags
@@ -163,7 +221,7 @@ class DifcAuthorizer {
     }
   }
 
-  def updateEfCache(resource: ResourcePattern, newEfLabel: VersionedEffectiveSetEntries): Unit = {
+  private def updateEfCache(resource: ResourcePattern, newEfLabel: VersionedEffectiveSetEntries): Unit = {
     if (newEfLabel.tags.nonEmpty) {
       efCache = efCache.updated(resource, newEfLabel)
     } else {
@@ -178,16 +236,16 @@ class DifcAuthorizer {
     !tags.isEmpty
   }
 
-  def checkTagExists(label: TagSeqs, resource: ResourcePattern, entity: KafkaPrincipal, operation: AclOperation): Boolean = {
-    // Check if there are any Allow ACLs which would allow this operation.
-    // Allowing read, write, delete, or alter implies allowing describe.
-    // See #{org.apache.kafka.common.acl.AclOperation} for more details about ACL inheritance.
-    val allowOps = operation match {
-      case DESCRIBE => Set[AclOperation](READ, WRITE)
-      case _ => Set[AclOperation](operation)
-    }
-    allowOps.exists(operation => matchingTagExists(operation, resource, entity, label))
-  }
+//  def checkTagExists(label: TagSeqs, resource: ResourcePattern, entity: KafkaPrincipal, operation: AclOperation): Boolean = {
+//    // Check if there are any Allow ACLs which would allow this operation.
+//    // Allowing read, write, delete, or alter implies allowing describe.
+//    // See #{org.apache.kafka.common.acl.AclOperation} for more details about ACL inheritance.
+//    val allowOps = operation match {
+//      case DESCRIBE => Set[AclOperation](READ, WRITE)
+//      case _ => Set[AclOperation](operation)
+//    }
+//    allowOps.exists(operation => matchingTagExists(operation, resource, entity, label))
+//  }
 
   private def matchingTagExists(operation: AclOperation,
                                 resource: ResourcePattern,
@@ -195,7 +253,7 @@ class DifcAuthorizer {
                                 label: TagSeqs): Boolean = {
     label.find { tag =>
       tag.operation == operation && tag.entity == principal
-    }.exists { tag =>
+    }.exists { _ =>
 //      authorizerLogger.debug(s"operation = $operation on resource = $resource is ALLOWED based on tag = $tag")
       true
     }
@@ -214,33 +272,33 @@ class DifcAuthorizer {
     new TagSeqs(versionedLabel.toSeq)
   }
 
-  def addTags(zkClient: KafkaZkClient, tagBindings: immutable.List[TagBinding]): Boolean = {
+  def addTags(tagBindings: immutable.List[TagBinding]): Boolean = {
     // get the tags to add
     // call updateTopicLabel with the tags and the resource
     // log some output that conveys the operation is done
 
     val resource = tagBindings.head.pattern()
 
-    updateTopicLabel(zkClient, resource) { currentTags: Set[LabelEntry] =>
+    updateTopicLabel(resource) { currentTags: Set[LabelEntry] =>
       val tagsToAdd = tagBindings.map {tb: TagBinding => new LabelEntry(tb.entity(), tb.owner(), tb.operation())}
       currentTags ++ tagsToAdd
     }
   }
 
-  def deleteTags(zkClient: KafkaZkClient, tagBindings: immutable.List[TagBinding]): Boolean = {
+  def deleteTags(tagBindings: immutable.List[TagBinding]): Boolean = {
     // get the tags to delete
     // call updateTopicLabel with the tags and the resource
     // log some output that conveys the operation is done
 
     val resource = tagBindings.head.pattern()
 
-    updateTopicLabel(zkClient, resource) { currentAcls: Set[LabelEntry] =>
+    updateTopicLabel(resource) { currentAcls: Set[LabelEntry] =>
       val tagsToDelete = tagBindings.map {tb: TagBinding => new LabelEntry(tb.entity(), tb.owner(), tb.operation())}
       currentAcls -- tagsToDelete
     }
   }
 
-  private def updateTopicLabel(zkClient: KafkaZkClient, resource: ResourcePattern)(getNewTags: Set[LabelEntry] => Set[LabelEntry]): Boolean = {
+  private def updateTopicLabel(resource: ResourcePattern)(getNewTags: Set[LabelEntry] => Set[LabelEntry]): Boolean = {
     val currentVersionedLabel =
       if (labelCache.contains(resource))
         getLabelFromCache(resource)
@@ -260,7 +318,7 @@ class DifcAuthorizer {
 //      debug(s"Updated tags for $resource to $newVersionedLabel")
       updateCache(resource, newVersionedLabel)
       updateEfCache(resource, filterEffective(newVersionedLabel))
-      updateLabelChangedFlag(zkClient, resource)
+      updateLabelChangedFlag(resource)
       true
     } else {
 //      debug(s"Updated tags for $resource, no change was made")
@@ -274,16 +332,16 @@ class DifcAuthorizer {
     labelCache.getOrElse(resource, throw new IllegalArgumentException(s"Label does not exist in the cache for resource $resource"))
   }
 
-  private def updateLabelChangedFlag(zkClient: KafkaZkClient, resource: ResourcePattern): Unit = {
+  private def updateLabelChangedFlag(resource: ResourcePattern): Unit = {
     zkClient.createLabelChangeNotification(resource)
   }
 
-  private[authorizer] def processLabelChangeNotification(zkClient: KafkaZkClient, resource: ResourcePattern): Unit = {
-    val versionedLabel = getLabelFromZk(zkClient, resource)
-//    info(s"Processing label change notification for $resource, versionedAcls : ${versionedLabel.tags}, zkVersion : ${versionedLabel.zkVersion}")
-    updateCache(resource, versionedLabel)
-    updateEfCache(resource, filterEffective(versionedLabel))
-  }
+//  private[authorizer] def processLabelChangeNotification(resource: ResourcePattern): Unit = {
+//    val versionedLabel = getLabelFromZk(zkClient, resource)
+////    info(s"Processing label change notification for $resource, versionedAcls : ${versionedLabel.tags}, zkVersion : ${versionedLabel.zkVersion}")
+//    updateCache(resource, versionedLabel)
+//    updateEfCache(resource, filterEffective(versionedLabel))
+//  }
 
 //  private object LabelChangedNotificationHandler extends LabelChangeNotificationHandler {
 //    def processNotification(zkClient: KafkaZkClient, resource: ResourcePattern): Unit = {

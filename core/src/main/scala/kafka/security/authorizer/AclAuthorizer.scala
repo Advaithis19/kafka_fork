@@ -587,7 +587,6 @@ class AclAuthorizer extends Authorizer with Logging {
   private def loadCache(): Unit = {
     lock synchronized  {
       loadAllAcls(zkClient, this, updateCache)
-      DifcAuthorizer.loadAllLabels(zkClient, difcAuthorizer.updateCache, difcAuthorizer.updateEfCache)
     }
   }
 

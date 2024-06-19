@@ -27,6 +27,7 @@ import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
 import kafka.network.{ControlPlaneAcceptor, DataPlaneAcceptor, RequestChannel, SocketServer}
 import kafka.raft.KafkaRaftManager
+import kafka.security.authorizer.DifcAuthorizer
 import kafka.server.metadata.{OffsetTrackingListener, ZkConfigRepository, ZkMetadataCache}
 import kafka.utils._
 import kafka.zk.{AdminZkClient, BrokerInfo, KafkaZkClient}
@@ -132,6 +133,8 @@ class KafkaServer(
   private var controlPlaneRequestProcessor: KafkaApis = _
 
   var authorizer: Option[Authorizer] = None
+  var difcAuthorizer: DifcAuthorizer = _
+
   @volatile var socketServer: SocketServer = _
   var dataPlaneRequestHandlerPool: KafkaRequestHandlerPool = _
   private var controlPlaneRequestHandlerPool: KafkaRequestHandlerPool = _
@@ -529,7 +532,11 @@ class KafkaServer(
 
         /* Get the authorizer and initialize it if one is specified.*/
         authorizer = config.createNewAuthorizer()
+        difcAuthorizer = new DifcAuthorizer
+
         authorizer.foreach(_.configure(config.originals))
+        difcAuthorizer.configure(config.originals)
+
         val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = authorizer match {
           case Some(authZ) =>
             authZ.start(brokerInfo.broker.toServerInfo(clusterId, config)).asScala.map { case (ep, cs) =>
@@ -575,6 +582,7 @@ class KafkaServer(
           metadataCache = metadataCache,
           metrics = metrics,
           authorizer = authorizer,
+          difcAuthorizer = difcAuthorizer,
           quotas = quotaManagers,
           fetchManager = fetchManager,
           brokerTopicStats = brokerTopicStats,

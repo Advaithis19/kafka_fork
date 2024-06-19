@@ -12,6 +12,8 @@ core/src/main/scala/kafka/security/authorizer
 clients/src/main/java/org/apache/kafka/server/authorizer
 core/src/main/scala/kafka/server
 
+# files to modify for ifc request from shell
+
 # files
 FetchRequest.java (line: 342)
 FetchResponse.java (line: 91) -> KafkaApis.scala (line: 762) -> AuthHelper.scala (line: 111) -> Authorizer.java (line: 105) / AclAuthorizer.scala (line: 228) -> KafkaZkClient.scala (line: 1305)

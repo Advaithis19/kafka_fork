@@ -1299,14 +1299,14 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     ZkAclChangeStore.stores.foreach(store => createRecursive(store.aclChangePath, throwIfPathExists = false))
   }
 
-//  def createLabelPaths(): Unit = {
-//    ZkLabelStore.stores.foreach(store => {
-//      createRecursive(store.labelPath, throwIfPathExists = false)
-//      createRecursive(store.path(ResourceType.TOPIC), throwIfPathExists = false)
-//    })
-//
-//    ZkLabelChangeStore.stores.foreach(store => createRecursive(store.labelChangePath, throwIfPathExists = false))
-//  }
+  def createLabelPaths(): Unit = {
+    ZkLabelStore.stores.foreach(store => {
+      createRecursive(store.labelPath, throwIfPathExists = false)
+      createRecursive(store.path(ResourceType.TOPIC), throwIfPathExists = false)
+    })
+
+    ZkLabelChangeStore.stores.foreach(store => createRecursive(store.labelChangePath, throwIfPathExists = false))
+  }
 
   /**
    * Gets VersionedAcls for a given Resource
